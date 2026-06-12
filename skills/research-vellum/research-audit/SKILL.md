@@ -26,13 +26,13 @@ Act as an adversarial reviewer. Assume the code may misrepresent itself:
 
 ### 1. Establish the baseline
 
-Load the intent source, in priority order: `docs/PSEUDOCODE.md` (the structured
-spec — its §2 control flow and §4 functions map almost 1:1 to claims), then
-`docs/REQUIREMENTS.md`, then the proposal or the researcher's message. If no
+Load the intent source, in priority order: `docs/PSEUDOCODE-*.md` (the structured
+spec — its §2 control flow and §3 key algorithms map to claims), then
+`docs/REQUIREMENTS-*.md`, then the proposal or the researcher's message. If no
 written baseline exists, write down your understanding of the intent as a numbered
 list and have the researcher confirm it BEFORE auditing — otherwise the audit
 checks code against your guess. Once confirmed, persist that list to
-`docs/REQUIREMENTS.md` so it becomes the durable baseline for later audits instead
+`docs/REQUIREMENTS-{name}.md` so it becomes the durable baseline for later audits instead
 of being reconstructed each time. Never reconstruct intent by paraphrasing the
 code under audit — that lets the code grade itself.
 

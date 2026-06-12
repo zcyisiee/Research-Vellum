@@ -1,6 +1,6 @@
 ---
 name: research-init
-description: Initialize a repository for human–AI collaborative ML/DL research. Use whenever the user wants to start a new experiment project, scaffold an experiment codebase, onboard or analyze an existing research repo, or says things like "/init", "set up the project", "帮我初始化", "分析一下这个仓库" — even if they do not mention scaffolding explicitly. Produces the directory skeleton, installs CLAUDE.md conventions, and writes the experiment-logic skeleton into docs/.
+description: Initialize a repository for human–AI collaborative ML/DL research. Use whenever the user wants to start a new experiment project, scaffold an experiment codebase, onboard or analyze an existing research repo, or says things like "/init", "set up the project", "帮我初始化", "分析一下这个仓库" — even if they do not mention scaffolding explicitly. Produces the directory skeleton, installs CLAUDE.md conventions, and writes pseudocode specs into docs/.
 ---
 
 # Research Init
@@ -23,6 +23,37 @@ In both modes, finish by installing `assets/CLAUDE.md.template` from this skill 
 the repository's `CLAUDE.md` (merge carefully if one already exists — never
 overwrite researcher-written content).
 
+## Pseudocode files
+
+All pseudocode lives in `docs/` with the prefix `PSEUDOCODE-`:
+
+```text
+docs/PSEUDOCODE-train.md
+docs/PSEUDOCODE-eval.md
+docs/PSEUDOCODE-gcg-attack.md
+```
+
+Each file starts with YAML frontmatter:
+
+```yaml
+---
+title: [实验脚本的一句话描述]
+entry_scripts:
+  - exp/train.py
+  - exp/config.yaml
+created: YYYY-MM-DD
+modified: YYYY-MM-DD
+status: draft | reviewed | verified
+---
+```
+
+- `status: draft` — 刚生成，研究员尚未审批
+- `status: reviewed` — 研究员已审批，可作为实现/审计基线
+- `status: verified` — 已通过 research-audit 验证与代码一致
+
+Pseudocode body follows the template in `references/pseudocode-spec.md`
+(golden sample: `references/pseudocode-example-gcg.md`).
+
 ## Mode A — New project scaffolding
 
 Scaffold only. Do not implement any experiment logic in this mode; implementation
@@ -34,18 +65,17 @@ happens later, against a recorded requirement.
    model X"); what a single run produces; what will be compared across runs
    (the hyperparameters that matter). Ask focused questions; do not proceed on
    guesses.
-2. **Record the requirement** in `docs/REQUIREMENTS.md`, in the researcher's own
-   words plus the clarifications they confirmed. This file is the baseline that
+2. **Record the requirement** in `docs/REQUIREMENTS-{name}.md`, in the researcher's
+   own words plus the clarifications they confirmed. This file is the baseline that
    the research-audit skill will later check scripts against, so it must be
    precise about anything that would change the experiment's meaning.
-3. **Draft the pseudocode** in `docs/PSEUDOCODE.md` using the template in
-   `references/pseudocode-spec.md` (golden sample: `references/pseudocode-example-gcg.md`).
-   This is the **top-level abstraction the researcher reviews** before any code is
-   written, and the primary claim source for research-audit. Fill §0–§2 at minimum;
-   keep §1a (searchable hyperparameters) and §1b (fixed experiment switches)
-   strictly separated — that boundary is what the later HPO stage is allowed to
-   touch. Leave §4 function bodies as signatures + intent; do not implement.
-   Have the researcher approve the pseudocode before scaffolding code.
+3. **Draft the pseudocode** in `docs/PSEUDOCODE-{name}.md` with YAML frontmatter
+   (status: draft). Fill §0–§2 at minimum; keep §1a (searchable hyperparameters)
+   and §1b (fixed experiment switches) strictly separated — that boundary is what
+   the later HPO stage is allowed to touch. Pseudocode describes experiment logic
+   only — do not write function signatures; AI decides `core/` function
+   decomposition freely during implementation. Have the researcher approve the
+   pseudocode before scaffolding code.
 4. **Create the skeleton:**
 
 ```text
@@ -62,50 +92,48 @@ core/  exp/  results/  achievements/  utils/  docs/
 
 ## Mode B — Existing codebase
 
-The goal is a map the researcher can audit, not a refactor. Do not restructure the
-legacy code; only add `docs/`, `results/` conventions, and `CLAUDE.md`.
+The goal is pseudocode the researcher can audit, not a refactor. Do not restructure
+the legacy code; only add `docs/`, `results/` conventions, and `CLAUDE.md`.
 
-1. **Find the entrypoints** (training/eval scripts, main configs) and trace the
-   actual execution path. Read function bodies; do not infer behavior from names.
-2. **Write `docs/REPO_SKELETON.md`.** Its backbone must be **experiment logic**,
-   not call-graph logic. Experiment logic is the researcher's mental model of the
-   procedure; code logic is how the repo happens to implement it. Structure: one
-   section per experiment-logic step, and under each step, where and how the code
-   realizes it, with `file:line` references.
+**Two sub-modes** depending on whether the researcher has existing documentation:
 
-**Example skeleton fragment (LLM training):**
+### B1 — Researcher has documentation (proposal, README with experiment description, etc.)
 
-```markdown
-## Experiment logic: one training step
-1. Forward pass — model produces logits for the batch
-   - entry: train.py:212 `model(batch)`; attention impl swapped in
-     models/patch.py:40 (monkey-patches HF attention at import time — note:
-     this happens implicitly, flag for researcher)
-2. Loss computation — token-level CE, ignore_index=-100
-   - losses/ce.py:18; label shifting done in data collator, not in loss
-     (collate.py:77)
-3. Backward — grad accumulation x8, clipping at 1.0
-   - train.py:230-241; clipping BEFORE accumulation boundary — unusual, flag
-4. Update — AdamW, cosine schedule
-   - train.py:245; scheduler stepped per micro-batch, not per optimizer step
-     — likely bug or intentional, flag
-```
+1. **Trace the execution path.** Find the entrypoints (training/eval scripts, main
+   configs) and read function bodies to understand what the code actually does.
+   Do not infer behavior from names.
+2. **Generate pseudocode.** For each experiment script/phase, create a
+   `docs/PSEUDOCODE-{name}.md` file with YAML frontmatter (entry_scripts, dates,
+   status: draft). The pseudocode describes what the code **actually does**,
+   structured per the spec template (§0–§5).
+3. **Generate diff report.** Create `docs/DIFF-{name}.md` comparing:
+   - What the researcher's documentation says the experiment should do
+   - What the code actually does (as captured in the pseudocode)
+   Flag any discrepancies: silent extras, missing components, behavioral surprises.
+   This is the Mode B equivalent of research-audit's claim decomposition — but
+   done at init time to surface issues early.
+4. **Install conventions:** create `results/` and `docs/MISTAKES.md` if absent,
+   install `CLAUDE.md`, note any repo-specific layout deviations.
+5. **Hand back a summary:** the list of generated pseudocode files, flagged
+   discrepancies, and open questions. Do not start changing code.
 
-   The "flag" items matter most: anywhere the code's behavior would surprise a
-   researcher reading only the top level, say so explicitly.
-3. **Inventory the configs:** where hyperparameters live, which are actually read,
-   which are silently defaulted. Put this in the same doc.
-4. **Add the run conventions:** create `results/` and `docs/MISTAKES.md` if absent,
-   install `CLAUDE.md`, and note in it any repo-specific deviations from the
-   standard layout (per the template's own escape clause).
-5. **Hand back a summary:** the skeleton's table of contents, the flagged
-   surprises, and open questions for the researcher. Do not start changing code.
+### B2 — No documentation (researcher wants to understand the codebase)
+
+1. **Trace the execution path.** Same as B1 step 1.
+2. **Generate pseudocode.** Same as B1 step 2, but the pseudocode serves as the
+   researcher's first map of what the codebase does. Be especially clear in §0
+   (purpose) and §2 (control flow) — these sections must let the researcher
+   understand the experiment logic without reading the source code.
+3. **Install conventions.** Same as B1 step 4.
+4. **Hand back a summary:** the list of generated pseudocode files, a brief
+   overview of the experiment logic per file, and open questions.
 
 ## Quality bar
 
-- Every claim in `REPO_SKELETON.md` carries a `file:line` reference.
-- A researcher who reads only `docs/` should be able to predict what a run will do.
-- Mode A: §1a and §1b in `PSEUDOCODE.md` are cleanly separated; §0–§2 are complete
+- Mode A: §1a and §1b in pseudocode are cleanly separated; §0–§2 are complete
   enough to review without reading code.
-- All baseline docs (`REQUIREMENTS.md`, `PSEUDOCODE.md`, `REPO_SKELETON.md`) are
-  written for iteration: short sections, stable headings, so later diffs stay readable.
+- Mode B: every pseudocode file accurately reflects what the code does; the
+  researcher reading only `docs/PSEUDOCODE-*.md` can predict what a run will do.
+- All pseudocode files have valid YAML frontmatter.
+- All baseline docs are written for iteration: short sections, stable headings,
+  so later diffs stay readable.

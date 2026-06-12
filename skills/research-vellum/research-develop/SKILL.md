@@ -86,10 +86,10 @@ researcher with a diagnosis.
 ### 7. Close the loop in docs
 
 If the change alters experiment logic, update the affected section of
-`docs/PSEUDOCODE.md` (or `docs/REPO_SKELETON.md` for legacy repos). If the change
+the relevant `docs/PSEUDOCODE-{name}.md` file. If the change
 was prompted by a bug, append a terse entry to `docs/MISTAKES.md` (symptom → root
 cause → guard added) and, if it warrants a standing rule, a Gotcha line in
-`PSEUDOCODE.md` §5.
+the pseudocode's §5.
 
 ## Assert lifecycle
 

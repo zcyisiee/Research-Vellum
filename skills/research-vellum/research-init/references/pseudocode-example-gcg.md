@@ -1,9 +1,21 @@
 # 伪代码范例：GCG 主流程
 
-填好的 `docs/PSEUDOCODE.md` 应有的样子（黄金样例）。注意 §1a/§1b 的清晰区分、§2 的
-控制流分支、§4 函数 signature 的 shape 注释与形式化表达。
+填好的 `docs/PSEUDOCODE-gcg-attack.md` 应有的样子（黄金范例）。注意 YAML frontmatter
+的元数据、§1a/§1b 的清晰区分、§2 的自然语言控制流叙事、§3 对核心算法公式的集中呈现。
 
 ---
+
+```yaml
+---
+title: GCG 对抗后缀优化主流程
+entry_scripts:
+  - exp/gcg_attack.py
+  - exp/config.yaml
+created: 2024-01-15
+modified: 2024-03-20
+status: reviewed
+---
+```
 
 【算法名称】：GCG (Greedy Coordinate Gradient) — Universal and Transferable Adversarial Attacks on Aligned Language Models (Zou et al., 2023)
 
@@ -65,59 +77,74 @@ $$\mathbf{c}^* = \arg\min_{\mathbf{c} \in \mathcal{V}^L} \;\; \sum_{i=1}^{N} \ma
 | `devices` | GPU 设备分配列表，如 `["cuda:0", "cuda:1"]` |
 | `conv_template_name` | 对话模板名称，如 `"vicuna_v1.1"`, `"llama-2"` |
 
+> 1a 与 1b 的区分是给第二阶段超参搜索用的硬边界：搜索 Agent 只能动 1a，碰 1b 即违规。
+
 ---
 
 ## 【2. 主控制流】
 
-### 2a. 初始化阶段
+### 2a. 初始化
 
 ```
-1. 加载实验配置
-   params = load_config(config_path)
-2. 加载目标行为数据集
-   train_goals, train_targets, test_goals, test_targets = get_goals_and_targets(params)
-   // 从 CSV 读取 n_train_data 条 (goal, target) 对
-3. 加载模型和分词器到 GPU Worker 进程
-   train_workers, test_workers = get_workers(params)
-   // 训练时 use_cache=False，评估时 use_cache=True
-4. 根据 params.attack 动态导入攻击库
-   attack_lib = importlib.import_module(f'llm_attacks.{params.attack}')
+1. 从 config 加载所有超参和运行时路径
+2. 从 CSV 读取 n_train_data 条 (goal, target) 对作为训练集，n_test_data 条作为测试集
+3. 将每个目标模型和分词器加载到对应 GPU，创建 Worker 进程
+   训练时 Worker 关闭 KV Cache（需要计算梯度），评估时开启
+4. 根据 attack 类型动态导入对应的攻击模块
 ```
 
-### 2b. 攻击实例创建（根据模式分支）
+### 2b. 攻击实例创建
 
 ```
-如果 params.transfer == True:
-    attack = ProgressiveMultiPromptAttack(goals, targets, workers,
-        progressive_goals=params.progressive_goals,
-        progressive_models=params.progressive_models)
+如果 transfer == True:
+    创建 ProgressiveMultiPromptAttack（支持渐进式添加目标和模型）
 否则:
-    attack = IndividualPromptAttack(goals, targets, workers)
+    创建 IndividualPromptAttack（单 prompt 攻击）
 ```
 
 ### 2c. 攻击主循环
 
 ```
-对每个 goal_j, target_j in (train_goals, train_targets):
-    1. control = control_init
-       manager = GCGPromptManager([goal_j], [target_j], tokenizer, conv_template, control_init)
+对每个 (goal, target) 训练对:
+    1. 初始化对抗后缀为 control_init，创建 PromptManager 管理 prompt 拼接
     2. 循环 step = 0 .. n_steps-1:
-        2a. grads = [worker.grad(manager) for worker in train_workers]   # (n_ctrl, vocab)
-            多模型：先 L2 归一化每个 grad，再逐元素求和
-        2b. cand_toks = manager.sample_control(grad_agg, batch_size, topk, temp, allow_non_ascii)
-        2c. 如果 filter_cand: cand_toks = get_filtered_cands(cand_toks, tokenizer)
-        2d. 对每个候选算 loss = target_weight*target_loss + control_weight*control_loss
-            选 loss 最小的候选 → cand_loss_min, cand_control_best
-        2e. 如果 anneal: 以 P(loss, cand_loss_min, step) 接受
-            否则若 cand_loss_min < loss_current: 接受
-        2f. 如果 loss < best_loss: best_control, best_loss = control, loss
-        2g. 如果 step % test_steps == 0: 评估 JB% / EM%，写日志
-    3. result_j = (best_control, best_loss, n_steps)
+        a. 计算梯度：对每个训练模型，算出 loss 对后缀每个位置 one-hot 编码的梯度
+           多模型时：先 L2 归一化每个模型的梯度，再逐元素求和
+        b. 采样候选：从 -grad 方向取 topk 个 token，随机选位置替换，生成 batch_size 个候选后缀
+           若 allow_non_ascii == False：禁止采样的 token 位置梯度置为 +inf
+        c. 过滤候选（若 filter_cand）：每个候选 decode→encode，丢弃长度变化的
+        d. 评估候选：对每个候选计算 loss = target_weight × 目标损失 + control_weight × 后缀损失
+           选出 loss 最小的候选
+        e. 接受判定：若 anneal == True，用模拟退火策略决定是否接受（见 §3）
+           否则：仅当候选 loss < 当前 loss 时接受
+        f. 更新全局最优：若当前 loss < best_loss，记录为最优
+        g. 每隔 test_steps 步：在测试集上评估越狱成功率 (JB%) 和精确匹配率 (EM%)，写日志
+    3. 输出该 goal 的最优后缀、最优 loss、总步数
 ```
 
 ---
 
-## 【3. 维护状态】
+## 【3. 关键算法细节】
+
+### 3.1 坐标梯度的计算
+
+GCG 的核心 trick：不直接对离散 token 求梯度，而是对后缀位置的 one-hot 嵌入求梯度，再用梯度近似离散优化的方向。
+
+$$\nabla_{\mathbf{h}} \mathcal{L}_{\text{CE}}\bigl(f_\theta(\mathbf{e}_{<c} \oplus \mathbf{h} E \oplus \mathbf{e}_{>c}),\; \mathbf{t}\bigr)$$
+
+其中 $\mathbf{h}$ 为后缀 one-hot 矩阵，$E$ 为模型 embedding 权重。梯度矩阵的 $(i, v)$ 元素表示：将位置 $i$ 替换为 token $v$ 后 loss 的变化趋势。取 $-\text{grad}$ 的 top-k 即为最有潜力的替换方向。
+
+### 3.2 模拟退火接受策略
+
+当 `anneal == True` 时，不仅接受更优的候选，也以递减概率接受较差候选，帮助跳出局部最优：
+
+$$P(e, e', k) = \begin{cases} 1 & e' < e \\ \exp\!\bigl(-\tfrac{e'-e}{T_k}\bigr) & \text{otherwise} \end{cases}, \quad T_k = 1 - \frac{k+1}{K + K_0}$$
+
+温度 $T_k$ 随步数线性衰减到 0，后期退化为贪心接受。
+
+---
+
+## 【4. 维护状态】
 
 | 变量名 | 描述 | 初始值 |
 |---|---|---|
@@ -130,98 +157,13 @@ $$\mathbf{c}^* = \arg\min_{\mathbf{c} \in \mathcal{V}^L} \;\; \sum_{i=1}^{N} \ma
 
 ---
 
-## 【4. 核心函数】
-
-### 4.1 计算对抗后缀的坐标梯度
-
-```python
-def token_gradients(
-    model: PreTrainedModel,
-    input_ids: torch.Tensor,        # shape: (1, seq_len)
-    input_slice: slice,             # 完整输入区间
-    target_slice: slice,            # 目标 token 区间
-    loss_slice: slice,              # 损失计算区间 (target_slice 左移 1)
-    control_slice: slice,           # 对抗后缀 token 区间
-) -> torch.Tensor:                  # shape: (n_control_toks, vocab_size)
-```
-- **输出:** 损失对后缀每个位置 one-hot 编码的梯度
-- **逻辑:**
-  1. `E = model.get_input_embeddings().weight`  # (vocab, embed_dim)
-  2. 对控制 token 建 one-hot `oh`，`oh.requires_grad = True`
-  3. `ctrl_embeds = oh @ E`
-  4. `full_embeds = cat([embed(before), ctrl_embeds, embed(after)])`
-  5. `logits = model(inputs_embeds=full_embeds).logits`
-  6. `loss = CE(logits[0, loss_slice], targets)`；`loss.backward()`
-  7. 返回 `oh.grad`
-- **形式化:**
-
-$$\nabla_{\mathbf{h}} \mathcal{L}_{\text{CE}}\bigl(f_\theta(\mathbf{e}_{<c} \oplus \mathbf{h} E \oplus \mathbf{e}_{>c}),\; \mathbf{t}\bigr)$$
-
-### 4.2 基于梯度采样候选后缀
-
-```python
-def sample_control(
-    grad: torch.Tensor,             # shape: (n_ctrl, vocab_size)
-    batch_size: int,
-    topk: int,
-    temperature: float,
-    allow_non_ascii: bool,
-    not_allowed_ids: torch.Tensor,  # shape: (n_forbidden,)
-) -> torch.Tensor:                  # shape: (batch_size, n_ctrl)
-```
-- **输出:** 候选后缀 token ID 序列
-- **逻辑:**
-  1. 若 `not allow_non_ascii`：把 `not_allowed_ids` 位置的梯度设为 `+inf`
-  2. `topk_ids = topk(-grad, k=topk, dim=-1).indices`
-  3. 每个候选：随机选位置 `pos`，从 `topk_ids[pos]` 随机取 token 替换
-  4. 返回所有候选
-
-### 4.3 过滤 tokenize 不一致的候选
-
-```python
-def get_filtered_cands(
-    control_toks: torch.Tensor,     # shape: (batch_size, n_ctrl)
-    tokenizer: PreTrainedTokenizer,
-) -> torch.Tensor:                  # shape: (batch_size', n_ctrl)
-```
-- **逻辑:** 每个候选 decode→encode，仅保留长度仍为 `n_ctrl` 的候选。
-
-### 4.4 计算目标回复上的交叉熵损失
-
-```python
-def target_loss(
-    logits: torch.Tensor,           # shape: (batch_size, seq_len, vocab_size)
-    target_ids: torch.Tensor,       # shape: (batch_size, target_len)
-    target_slice: slice,
-    loss_slice: slice,              # target_slice 左移 1
-) -> torch.Tensor:                  # shape: (batch_size, target_len)
-```
-- **形式化:**
-
-$$\mathcal{L}_{\text{target}} = -\sum_{j=1}^{|\mathbf{t}|} \log P_\theta(t_j \mid \text{prompt} \oplus \mathbf{c},\; t_{<j})$$
-
-### 4.5 模拟退火接受判定
-
-```python
-def simulate_annealing_accept(
-    e_current: float, e_candidate: float,
-    step: int, n_steps: int, anneal_from: int,
-) -> bool:
-```
-- **逻辑:** `e_candidate < e_current` 直接接受；否则以 $\exp(-(e'-e)/T)$ 概率接受。
-- **形式化:**
-
-$$P(e, e', k) = \begin{cases} 1 & e' < e \\ \exp\!\bigl(-\tfrac{e'-e}{T_k}\bigr) & \text{otherwise} \end{cases}, \quad T_k = 1 - \frac{k+1}{K + K_0}$$
-
----
-
 ## 【5. Gotcha 账本】
 
 > 初始化时无需编写；随实验迭代追加。示例：
 
 <!--
 - G1: KV Cache 与梯度计算不兼容
-  - 表现: 开启 use_cache=True 后 token_gradients 返回 None 或 OOM
+  - 表现: 开启 use_cache=True 后梯度返回 None 或 OOM
   - 原因: enable_grad() 下 KV Cache 中间状态不可对 one-hot 嵌入求导
   - 规则: 梯度计算时 use_cache=False，评估时 use_cache=True
   - 对应自检: assert 模型在 grad 路径上 config.use_cache == False
